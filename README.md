@@ -66,6 +66,21 @@ console.log(result.executedSql);
 console.log(result.rows);
 ```
 
+### Query timeout defaults
+
+- `statement_timeout`: `15000ms`
+- `lock_timeout`: `2000ms`
+
+You can override them:
+
+```ts
+const executor = new PostgresExecutor({
+  connectionString: process.env.DATABASE_URL!,
+  statementTimeoutMs: 10000,
+  lockTimeoutMs: 1000,
+});
+```
+
 ## Notes
 
 - Use a read-only DB role for this service.
