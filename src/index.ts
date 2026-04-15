@@ -21,6 +21,7 @@ export interface SafeSqlLayerConfig {
 export interface AskResult<T = Record<string, unknown>> {
   generatedSql: string;
   executedSql: string;
+  params: unknown[];
   rows: T[];
 }
 
@@ -50,11 +51,12 @@ export class SafeSqlLayer {
       throw new Error(`SQL rejected by deterministic validator: ${validation.reason}`);
     }
 
-    const result = await this.config.executor.query<T>(validation.sql);
+    const result = await this.config.executor.query<T>(validation.sql, validation.params);
 
     return {
       generatedSql,
       executedSql: validation.sql,
+      params: validation.params,
       rows: result.rows,
     };
   }

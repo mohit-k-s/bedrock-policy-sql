@@ -63,8 +63,16 @@ orgs(id, name, plan, created_at)
 
 const result = await layer.ask("List active users with their org names", { tenantId: "tenant_123" });
 console.log(result.executedSql);
+console.log(result.params);
 console.log(result.rows);
 ```
+
+`ask(...)` returns:
+
+- `generatedSql`: model output before deterministic validation
+- `executedSql`: normalized SQL sent to Postgres
+- `params`: bound parameters used with `executedSql` (for tenant guardrails and future parameterized rewrites)
+- `rows`: query results
 
 ### Query timeout defaults
 

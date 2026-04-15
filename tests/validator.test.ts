@@ -70,8 +70,27 @@ describe("SqlValidator", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("allows an unqualified column when exactly one joined table exposes it", () => {
+    const result = validator.validate("select email from users join orgs on users.org_id = orgs.id");
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects an ambiguous unqualified column in a join", () => {
+    const result = validator.validate("select id from users join orgs on users.org_id = orgs.id");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("Ambiguous unqualified column");
+  });
+
   it("rejects blocked functions", () => {
     const result = validator.validate("select pg_sleep(1) from users");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("Function not allowed");
+  });
+
+  it("rejects schema-qualified blocked functions", () => {
+    const result = validator.validate("select pg_catalog.pg_sleep(1) from users");
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("Function not allowed");
@@ -116,7 +135,8 @@ describe("SqlValidator tenant guardrails", () => {
     const result = tenantValidator.validate("select id, name from users", { tenantId: "t_123" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.sql.toLowerCase()).toContain("\"users\".tenant_id = 't_123'");
+    expect(result.sql.toLowerCase()).toContain("\"users\".tenant_id = $1");
+    expect(result.params).toEqual(["t_123"]);
   });
 
   it("does not require tenantId for unscoped tables", () => {
@@ -132,15 +152,53 @@ describe("SqlValidator tenant guardrails", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const sql = result.sql.toLowerCase();
-    expect(sql).toContain("\"u\".tenant_id = 'tenanta'");
+    expect(sql).toContain("\"u\".tenant_id = $1");
     expect(sql).not.toContain("o.tenant_id");
+    expect(result.params).toEqual(["tenantA"]);
+  });
+
+  it("injects tenant predicate into outer join condition instead of where", () => {
+    const joinTenantPolicy = createSqlPolicy({
+      tables: {
+        users: { columns: ["id", "org_id"] },
+        orgs: { columns: ["id", "name", "tenant_id"], tenantScoped: true },
+      },
+      defaultLimit: 10,
+      maxLimit: 100,
+    });
+    const joinTenantValidator = new SqlValidator(joinTenantPolicy);
+
+    const result = joinTenantValidator.validate(
+      "select u.id, o.name from users u left join orgs o on o.id = u.org_id",
+      { tenantId: "tenantA" },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const sql = result.sql.toLowerCase();
+    expect(sql).toContain("left join");
+    expect(sql).toContain("on \"o\".id = \"u\".org_id and \"o\".tenant_id = $1");
+    expect(sql).not.toContain("where \"o\".tenant_id");
+    expect(result.params).toEqual(["tenantA"]);
   });
 
   it("uses custom tenant column when configured", () => {
     const result = tenantValidator.validate("select id from invoices", { tenantId: "acct_7" });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.sql.toLowerCase()).toContain("\"invoices\".account_id = 'acct_7'");
+    expect(result.sql.toLowerCase()).toContain("\"invoices\".account_id = $1");
+    expect(result.params).toEqual(["acct_7"]);
+  });
+
+
+  it("parameterizes tenantId instead of interpolating raw value", () => {
+    const result = tenantValidator.validate("select id from users", { tenantId: "a' OR 1=1 --" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.sql).toContain("$1");
+    expect(result.sql).not.toContain("OR 1=1");
+    expect(result.params).toEqual(["a' OR 1=1 --"]);
   });
 });
 
@@ -203,9 +261,10 @@ describe("SqlValidator complex queries", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const sql = result.sql.toLowerCase();
-    expect(sql).toContain("\"u\".tenant_id = 'tenant_42'");
+    expect(sql).toContain("\"u\".tenant_id = $1");
     expect(sql).toContain("where");
     expect(sql).toContain("and");
+    expect(result.params).toEqual(["tenant_42"]);
   });
 
   it("injects tenant filters for multiple tenant-scoped tables in joins", () => {
@@ -225,8 +284,9 @@ describe("SqlValidator complex queries", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const sql = result.sql.toLowerCase();
-    expect(sql).toContain("\"u\".tenant_id = 'tx'");
-    expect(sql).toContain("\"i\".tenant_id = 'tx'");
+    expect(sql).toContain("\"u\".tenant_id = $1");
+    expect(sql).toContain("\"i\".tenant_id = $2");
+    expect(result.params).toEqual(["tX", "tX"]);
   });
 
   it("allows IN subquery and enforces default limit on both levels", () => {
@@ -294,8 +354,9 @@ describe("SqlValidator complex queries", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const sql = result.sql.toLowerCase();
-    expect(sql).toContain("\"users\".tenant_id = 'z9'");
-    expect(sql.match(/tenant_id = 'z9'/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(sql).toContain("\"users\".tenant_id = $1");
+    expect(sql).toContain("\"users\".tenant_id = $2");
+    expect(result.params).toEqual(["z9", "z9"]);
   });
 
   it("rejects tenant-scoped nested subquery when tenantId missing", () => {
@@ -322,10 +383,58 @@ describe("SqlValidator complex queries", () => {
     expect(result.reason).toContain("Set operations are not allowed");
   });
 
+  it("rejects set operations like UNION ALL", () => {
+    const result = validator.validate("select id from users union all select id from users");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("Set operations are not allowed");
+  });
+
+  it("rejects set operations like INTERSECT", () => {
+    const result = validator.validate("select id from users intersect select id from users");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("Set operations are not allowed");
+  });
+
+  it("rejects set operations like EXCEPT", () => {
+    const result = validator.validate("select id from users except select id from users");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("Set operations are not allowed");
+  });
+
   it("rejects offset-only queries", () => {
     const result = validator.validate("select id from users offset 10");
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("OFFSET without LIMIT is not allowed");
+  });
+});
+
+describe("createSqlPolicy validation", () => {
+  it("rejects non-positive defaultLimit", () => {
+    expect(() =>
+      createSqlPolicy({
+        defaultLimit: 0,
+      }),
+    ).toThrow("defaultLimit must be a positive integer");
+  });
+
+  it("rejects non-positive maxLimit", () => {
+    expect(() =>
+      createSqlPolicy({
+        maxLimit: -1,
+      }),
+    ).toThrow("maxLimit must be a positive integer");
+  });
+
+  it("rejects defaultLimit greater than maxLimit", () => {
+    expect(() =>
+      createSqlPolicy({
+        defaultLimit: 101,
+        maxLimit: 100,
+      }),
+    ).toThrow("defaultLimit must be less than or equal to maxLimit");
   });
 });

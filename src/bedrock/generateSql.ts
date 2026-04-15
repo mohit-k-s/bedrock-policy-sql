@@ -46,12 +46,39 @@ export async function generateSqlFromBedrock(input: GenerateSqlInput): Promise<s
   );
 
   const text = new TextDecoder().decode(response.body);
-  const parsed = JSON.parse(text) as { content?: Array<{ type?: string; text?: string }> };
-  const sql = parsed.content?.find((chunk) => chunk.type === "text")?.text?.trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Bedrock response was not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const sql = extractTextFromBedrockResponse(parsed);
 
   if (!sql) {
-    throw new Error("Bedrock returned empty SQL response");
+    throw new Error("Bedrock returned no text content");
   }
 
   return sql.replace(/^```sql\s*/i, "").replace(/```$/i, "").trim();
+}
+
+function extractTextFromBedrockResponse(parsed: unknown): string | undefined {
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const obj = parsed as Record<string, unknown>;
+
+  const content = obj.content;
+  if (Array.isArray(content)) {
+    for (const chunk of content) {
+      if (!chunk || typeof chunk !== "object") continue;
+      const chunkObj = chunk as Record<string, unknown>;
+      if (chunkObj.type === "text" && typeof chunkObj.text === "string") {
+        return chunkObj.text.trim();
+      }
+    }
+  }
+
+  if (typeof obj.outputText === "string") return obj.outputText.trim();
+  if (typeof obj.completion === "string") return obj.completion.trim();
+  if (typeof obj.generated_text === "string") return obj.generated_text.trim();
+  return undefined;
 }
